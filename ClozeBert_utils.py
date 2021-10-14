@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import re
@@ -7,28 +8,28 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import torch
 import transformers
-from sklearn.metrics import accuracy_score
 from torch.utils.data import TensorDataset, DataLoader, SequentialSampler
-from torchsummary import summary
 from tqdm import tqdm
-from transformers import AlbertTokenizer
+from transformers import AutoTokenizer
 
 from ClozeDataset import ClozeDataset
 
 bert_path = 'albert-large-v2'
 data_path = 'ELE'
 loader_path = 'loaders'
+WORD_SPLIT_MASKS = '.?!, '
 EOS_MARKS = r'[\.?!]'
 STRIP_MARKS = '\"\''
 DO_STRIP = True
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 EPOCHS = 5
 BATCH_SIZE = 40
-SENTENCE_LEN = 1024
+SENTENCE_LEN = 512
 USE_BERT_LM_LOSS = True
 MODEL_FILE_NAME = 'cloze_albert_first_attempt.bin'
 print(bert_path)
-tokenizer = AlbertTokenizer.from_pretrained(bert_path)
+tokenizer = AutoTokenizer.from_pretrained(bert_path)
+BLANK_ID = tokenizer.convert_tokens_to_ids('[MASK]')
 
 
 def plot_train_len(train_data):
@@ -44,58 +45,69 @@ def read_data_json_for_whole_passage(dir_name):
     options, answers = [], []
     all_masked_indices, all_complete_ids = [], []
     input_ids, input_types, input_masks = [], [], []
-    all_raw_articles, all_raw_options, all_raw_answers = []
+    all_raw_options, all_raw_answers = [], []
     for file_name in tqdm(file_ls):
         with open(os.path.join(data_dir, file_name), encoding='utf-8') as f:
             json_content = json.load(f)
-            if len(json_content['article']) > SENTENCE_LEN:
-                all_raw_articles.extend(
-                    json_content['article'][x * SENTENCE_LEN + 1:(x + 1) * SENTENCE_LEN] for x in
-                    range(len(json_content['article']) // SENTENCE_LEN + 1))
-                all_raw_options.extend(
-                    json_content['options'][x * SENTENCE_LEN + 1:(x + 1) * SENTENCE_LEN] for x in
-                    range(len(json_content['options']) // SENTENCE_LEN + 1))
-                all_raw_answers.extend(
-                    json_content['answers'][x * SENTENCE_LEN + 1:(x + 1) * SENTENCE_LEN] for x in
-                    range(len(json_content['answers']) // SENTENCE_LEN + 1))
+            json_content['article'] = json_content['article'].replace('_', '[MASK]')
+            encode_dict = tokenizer.encode_plus(json_content['article'])
+            # @TODO: try filling all samples to SENTENCE_LEN
+            if len(encode_dict['input_ids']) > SENTENCE_LEN:
+                cut_split_article = [
+                    torch.LongTensor(encode_dict['input_ids'][x * SENTENCE_LEN:(x + 1) * SENTENCE_LEN]).unsqueeze(0) for
+                    x in range(len(encode_dict['input_ids']) // SENTENCE_LEN)]
+                cut_split_article.append(torch.LongTensor(encode_dict['input_ids'][-SENTENCE_LEN - 1:-1]).unsqueeze(0))
+                input_ids.extend(cut_split_article)
+                acc = 0
+                for segment in cut_split_article:
+                    count = segment.shape[1] - (segment - BLANK_ID).count_nonzero()
+                    last_index = min(acc + count, len(json_content['options']))
+                    all_raw_options.append(json_content['options'][last_index - count:last_index])
+                    all_raw_answers.append(json_content['answers'][last_index - count:last_index])
+                    acc = acc + count
 
-    for r_article, r_options, r_answers in all_raw_articles, all_raw_options, all_raw_answers:
+                    input_mask = torch.zeros(SENTENCE_LEN, dtype=torch.int64)
+                    input_mask[0:len(segment)] = 1
+                    input_type = torch.ones(SENTENCE_LEN, dtype=torch.int64)
+                    input_types.append(input_type.unsqueeze(0))
+                    input_masks.append(input_mask.unsqueeze(0))
 
-            orig_article = r_article.replace('_', '[MASK]')
-            option = r_options
-            answer = list(map(lambda x: ord(x) - ord('A'), r_answers))
+            else:
+                # encode_dict =
+                input_ids.append(torch.LongTensor(encode_dict['input_ids']).unsqueeze(0))
+                input_types.append(torch.LongTensor(encode_dict['token_type_ids']).unsqueeze(0))
+                input_masks.append(torch.LongTensor(encode_dict['attention_mask']).unsqueeze(0))
+                all_raw_options.append(json_content['options'])
+                all_raw_answers.append(json_content['answers'])
 
-            encode_dict = tokenizer.encode_plus(orig_article, max_length=SENTENCE_LEN, padding='max_length',
-                                                truncation=True,
-                                                return_tensors='pt')
-            input_id = encode_dict['input_ids']
-            input_ids.append(input_id.to(DEVICE))
-            input_types.append(encode_dict['token_type_ids'].to(DEVICE))
-            input_masks.append(encode_dict['attention_mask'].to(DEVICE))
+    print('Processing data in {}'.format(dir_name))
+    for input_id, r_options, r_answers in zip(tqdm(input_ids), all_raw_options, all_raw_answers):
+        option = r_options
+        answer = list(map(lambda x: ord(x) - ord('A'), r_answers))
 
-            options.append(torch.LongTensor(list(map(lambda x: tokenizer.convert_tokens_to_ids(x), option))).to(DEVICE))
+        options_now = []
+        for o in option:
+            ids = [tokenizer.encode(x)[1] for x in o]
+            options_now.append(ids)
+        options.append(torch.LongTensor(options_now).to(DEVICE))
 
-            if dir_name != 'test':
-                find_flag = -1
-                ctr = 0
-                while r_article.find('_', find_flag + 1) != -1:
-                    find_flag = json_content['article'].find('_', find_flag + 1)
-                    if dir_name != 'test':
-                        r_article = r_article.replace('_', option[ctr][answer[ctr]], 1)
+        input_id = torch.LongTensor(input_id)
+        orig_input_id = copy.deepcopy(input_id)
+        if dir_name != 'test':
+            ctr = 0
+            for i in range(len(input_id[0])):
+                if input_id[0][i] == BLANK_ID:
+                    input_id[0][i] = tokenizer.encode(option[ctr][answer[ctr]])[1]
                     ctr = ctr + 1
-                complete_ids.append(
-                    tokenizer.encode_plus(r_article, max_length=SENTENCE_LEN,
-                                          padding='max_length',
-                                          truncation=True)['input_ids'])
-                complete_ids = torch.LongTensor(complete_ids)
-                complete_ids = complete_ids.masked_fill(
-                    input_id != tokenizer.convert_tokens_to_ids('[MASK]'), -100)
-                answers.append(torch.unsqueeze(torch.LongTensor(answer), 1).to(DEVICE))
 
-                all_complete_ids.append(complete_ids.to(DEVICE))
-            all_masked_indices.append(
-                torch.nonzero(r_article == tokenizer.convert_tokens_to_ids('[MASK]'))[:, 1].to(DEVICE))
-    return input_ids, input_types, input_masks, options, answers, all_masked_indices, all_complete_ids
+            complete_ids = input_id.masked_fill(
+                orig_input_id != BLANK_ID, -100)
+            answers.append(torch.unsqueeze(torch.LongTensor(answer), 1).to(DEVICE))
+
+            all_complete_ids.append(complete_ids.to(DEVICE))
+        # all_masked_indices.append(
+        #     torch.nonzero(torch.LongTensor(complete_ids) != -100)[:, 1].to(DEVICE))
+    return input_ids, input_types, input_masks, options, answers, all_complete_ids
 
 
 def read_data_json(dir_name):
@@ -122,7 +134,11 @@ def read_data_json(dir_name):
             except ValueError:
                 pass
             option = json_content['options']
-            options.append(torch.LongTensor(list(map(lambda x: tokenizer.convert_tokens_to_ids(x), option))).to(DEVICE))
+            options_now = []
+            for o in option:
+                ids = [tokenizer.encode(x)[1] for x in o]
+                options_now.append(ids)
+            options.append(torch.LongTensor(options_now).to(DEVICE))
             answer = list(map(lambda x: ord(x) - ord('A'), json_content['answers']))
             answers.append(torch.unsqueeze(torch.LongTensor(answer), 1).to(DEVICE))
             ctr = 0
@@ -176,7 +192,7 @@ def read_data_json(dir_name):
             input_masks.append(torch.LongTensor(input_mask).to(DEVICE))
             all_complete_ids.append(complete_ids.to(DEVICE))
             all_masked_indices.append(
-                torch.nonzero(input_id == tokenizer.convert_tokens_to_ids('[MASK]'))[:, 1].to(DEVICE))
+                torch.nonzero(input_id == BLANK_ID)[:, 1].to(DEVICE))
     return input_ids, input_types, input_masks, options, answers, all_masked_indices.unsqueeze(
         0), all_complete_ids
 
@@ -186,8 +202,7 @@ def pack_loaders(train, dev, test):
     train_loaders, dev_loaders, test_loaders = [], [], []
     for i in tqdm(range(len(train[0]))):
         train_article = TensorDataset(train[0][i], train[1][i], train[2][i], train[3][i].unsqueeze(0), train[4][i].T,
-                                      train[5][i].unsqueeze(0),
-                                      train[6][i])
+                                      train[5][i])
         train_sampler = SequentialSampler(train_article)
         train_loader = DataLoader(train_article, sampler=train_sampler, batch_size=BATCH_SIZE)
         train_loaders.append(train_loader)
@@ -196,8 +211,7 @@ def pack_loaders(train, dev, test):
     for i in tqdm(range(len(dev[0]))):
         try:
             dev_article = TensorDataset(dev[0][i], dev[1][i], dev[2][i], dev[3][i].unsqueeze(0), dev[4][i].T,
-                                        dev[5][i].unsqueeze(0),
-                                        dev[6][i])
+                                        dev[5][i])
         except AssertionError:
             print(i)
         dev_sampler = SequentialSampler(dev_article)
@@ -207,8 +221,7 @@ def pack_loaders(train, dev, test):
     print("Packing test...")
     for i in tqdm(range(len(test[0]))):
         try:
-            test_article = TensorDataset(test[0][i], test[1][i], test[2][i], test[3][i].unsqueeze(0),
-                                         test[5][i].unsqueeze(0))
+            test_article = TensorDataset(test[0][i], test[1][i], test[2][i], test[3][i].unsqueeze(0))
         except AssertionError:
             print(i)
         test_sampler = SequentialSampler(test_article)
@@ -234,15 +247,12 @@ def eval(eval_loaders, model=None):
     opt_acc_sum = 0
     acc = 0
     with torch.no_grad():
-        for i, loader in enumerate(eval_loaders):
-            for ids, types, masks, options, answers, mask_ids, complete_ids in tqdm(loader):
-                ids, types, masks, options, answers, mask_ids, complete_ids = ids.to(DEVICE), types.to(
-                    DEVICE), masks.to(
-                    DEVICE), options.to(DEVICE), answers.to(DEVICE), mask_ids.unsqueeze(1).to(
-                    DEVICE), complete_ids.to(
-                    DEVICE)
+        for i, loader in tqdm(enumerate(eval_loaders)):
+            for ids, types, masks, options, answers, mask_ids in loader:
+                ids, types, masks, options, answers, mask_ids = ids.to(DEVICE), types.to(DEVICE), masks.to(
+                    DEVICE), options.to(DEVICE), answers.to(DEVICE), mask_ids.unsqueeze(1).to(DEVICE)
                 output, option_opts, loss = model(ids, masks, types, mask_ids, options, answers)
-                opt_acc = (option_opts == answers.T).sum().float() / option_opts.shape[0]
+                opt_acc = (option_opts == answers).sum().float() / option_opts.shape[0]
                 opt_acc_sum += opt_acc.cpu()
                 acc += 1
         return opt_acc_sum / acc
@@ -266,11 +276,10 @@ def train(model, train_loaders, eval_loaders, lr=1e-4):
         acc = 0
         highest_dev_acc = 0
         for i, loader in tqdm(enumerate(train_loaders)):
-            for ids, types, masks, options, answers, mask_ids, complete_ids in loader:
-                ids, types, masks, options, answers, mask_ids, complete_ids = ids.to(DEVICE), types.to(
+            for ids, types, masks, options, answers, mask_ids in loader:
+                ids, types, masks, options, answers, mask_ids = ids.to(DEVICE), types.to(
                     DEVICE), masks.to(
-                    DEVICE), options.to(DEVICE), answers.to(DEVICE), mask_ids.unsqueeze(1).to(DEVICE), complete_ids.to(
-                    DEVICE)
+                    DEVICE), options.to(DEVICE), answers.to(DEVICE), mask_ids.unsqueeze(1).to(DEVICE)
                 model.train()
                 optimizer.zero_grad()
                 output, option_opts, loss = model(ids, masks, types, mask_ids, options, answers)
@@ -282,7 +291,7 @@ def train(model, train_loaders, eval_loaders, lr=1e-4):
                 optimizer.step()
                 scheduler.step()
                 loss_sum += loss.item()
-                opt_acc_sum += (option_opts == answers.T).sum().float() / option_opts.shape[0]
+                opt_acc_sum += (option_opts == answers).sum().float() / option_opts.shape[0]
                 acc += 1
                 # print(scheduler.get_lr())
             if (i + 1) % (len(train_loaders) // 5) == 0:
