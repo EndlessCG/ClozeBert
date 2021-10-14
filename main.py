@@ -4,14 +4,14 @@ from ClozeBert_utils import *
 from ClozeBert import ClozeBertModelForTransformers
 
 
-# plot_train_len(read_data_json("train")[0]
+# plot_train_len(read_data_json("train")[0])
 
-train_data, dev_data, test_data = read_data_json_for_whole_passage('train'), \
-                                  read_data_json_for_whole_passage('dev'), \
-                                  read_data_json_for_whole_passage('test')
-train_loaders, dev_loaders, test_loaders = pack_loaders(train_data, dev_data, test_data)
+# train_data, dev_data, test_data = read_data_json_for_whole_passage('train'), \
+#                                   read_data_json_for_whole_passage('dev'), \
+#                                   read_data_json_for_whole_passage('test')
+# train_loaders, dev_loaders, test_loaders = pack_loaders(train_data, dev_data, test_data)
 
-# train_loaders, dev_loaders, test_loaders = get_saved_loaders(loader_path)
+train_loaders, dev_loaders, test_loaders = get_saved_loaders(loader_path)
 
 config = AlbertConfig.from_pretrained(bert_path)
 # summary_model(MODEL_FILE_NAME)
