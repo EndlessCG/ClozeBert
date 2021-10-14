@@ -31,15 +31,13 @@ class ClozeBertModelForTransformers(nn.Module):
         output = self.bert(input_ids, attention_mask=masks, token_type_ids=token_type_ids)
         sequence_output = output[0]
         logits = self.cls(sequence_output)
-        num_sentence = mask_ids.shape[2]
-        mask_output = logits[0, mask_ids.squeeze(0).squeeze(1), :].squeeze(0)
-        option_indices = torch.arange(0, num_sentence, device=DEVICE).repeat(4, 1).T.reshape(-1)
+        num_question = answers.shape[1]
+        mask_ids = torch.nonzero(mask_ids != -100)[:, 2].to(DEVICE)
+        mask_output = logits[0, mask_ids, :].squeeze(0)
+        option_indices = torch.arange(0, num_question, device=DEVICE).repeat(4, 1).T.reshape(-1)
 
         # @TODO: 1. build a better tokenizer 2. fix here
-        try:
-            option_vals = mask_output[option_indices, options.reshape(-1)].reshape(-1, 4)
-        except IndexError:
-            pass
+        option_vals = mask_output[option_indices, options.reshape(-1)].reshape(-1, 4)
 
         option_opts = torch.argmax(option_vals, dim=1)
         loss = self.criterion(option_vals, answers.squeeze(0))
@@ -51,6 +49,7 @@ class ClozeBertModelForTransformers(nn.Module):
 
     def summary_net(self):
         writer = SummaryWriter()
-        writer.add_graph(self, [torch.zeros([20, 40]), torch.zeros([20, 40]), torch.zeros([20, 40]), torch.zeros([20, 4]),
-                                torch.zeros([20, 1]), torch.zeros([20, 1]), torch.zeros(20, 40)])
+        writer.add_graph(self,
+                         [torch.zeros([20, 40]), torch.zeros([20, 40]), torch.zeros([20, 40]), torch.zeros([20, 4]),
+                          torch.zeros([20, 1]), torch.zeros([20, 1]), torch.zeros(20, 40)])
         writer.close()
