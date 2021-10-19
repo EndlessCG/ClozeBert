@@ -81,7 +81,10 @@ def read_data_json_for_whole_passage(dir_name):
                 all_raw_answers.append(json_content['answers'])
 
     print('Processing data in {}'.format(dir_name))
-    for input_id, r_options, r_answers in zip(tqdm(input_ids), all_raw_options, all_raw_answers):
+    input_ids_, all_raw_options_, all_raw_answers_ = copy.deepcopy(input_ids), \
+                                                     copy.deepcopy(all_raw_options), \
+                                                     copy.deepcopy(all_raw_answers)
+    for input_id, r_options, r_answers in zip(tqdm(input_ids_), all_raw_options_, all_raw_answers_):
         option = r_options
         answer = list(map(lambda x: ord(x) - ord('A'), r_answers))
 
@@ -247,7 +250,7 @@ def eval(eval_loaders, model=None):
     opt_acc_sum = 0
     acc = 0
     with torch.no_grad():
-        for i, loader in tqdm(enumerate(eval_loaders)):
+        for i, loader in enumerate(tqdm(eval_loaders)):
             for ids, types, masks, options, answers, mask_ids in loader:
                 ids, types, masks, options, answers, mask_ids = ids.to(DEVICE), types.to(DEVICE), masks.to(
                     DEVICE), options.to(DEVICE), answers.to(DEVICE), mask_ids.unsqueeze(1).to(DEVICE)
@@ -308,7 +311,7 @@ def train(model, train_loaders, eval_loaders, lr=1e-4):
                 loss_sum = 0
                 opt_acc_sum = 0
 
-                if eval_acc > highest_dev_acc:
+                if eval_acc > highest_dev_acc and eval_acc > 0.5:
                     highest_dev_acc = eval_acc
                     torch.save(model, MODEL_FILE_NAME + str(eval_acc))
                     print("Model saved!")
