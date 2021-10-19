@@ -21,7 +21,7 @@ class ClozeBertModelForTransformers(nn.Module):
         super(ClozeBertModelForTransformers, self).__init__()
         self.bert = AlbertModel.from_pretrained(bert_path)
         self.cls = AlbertMLMHead(config)
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss(reduction='none')
 
     def accuracy(self, out, tgt):
         out = torch.argmax(out, -1)
@@ -40,7 +40,7 @@ class ClozeBertModelForTransformers(nn.Module):
         option_vals = mask_output[option_indices, options.reshape(-1)].reshape(-1, 4)
 
         option_opts = torch.argmax(option_vals, dim=1)
-        loss = self.criterion(option_vals, answers.squeeze(0))
+        loss = self.criterion(option_vals, answers.squeeze(0)).sum()
 
         if USE_BERT_LM_LOSS:
             return logits, option_opts, output.loss
