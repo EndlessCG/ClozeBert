@@ -21,7 +21,7 @@ model = ClozeBertModelForTransformers(config).to(DEVICE)
 
 plt.figure(figsize=(8, 8), dpi=80)
 plt.figure(1)
-LR = 9e-5
+LR = 2e-6
 loss_ls, acc_ls = train(model, train_loaders, dev_loaders, LR)
 print(loss_ls)
 print(acc_ls)

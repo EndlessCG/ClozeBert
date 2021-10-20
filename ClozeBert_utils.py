@@ -10,7 +10,7 @@ import torch
 import transformers
 from torch.utils.data import TensorDataset, DataLoader, SequentialSampler
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, pipeline
 
 from ClozeDataset import ClozeDataset
 
@@ -22,7 +22,7 @@ EOS_MARKS = r'[\.?!]'
 STRIP_MARKS = '\"\''
 DO_STRIP = True
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-EPOCHS = 5
+EPOCHS = 3
 BATCH_SIZE = 40
 SENTENCE_LEN = 512
 USE_BERT_LM_LOSS = True
@@ -30,7 +30,12 @@ MODEL_FILE_NAME = 'cloze_albert_first_attempt.bin'
 print(bert_path)
 tokenizer = AutoTokenizer.from_pretrained(bert_path)
 BLANK_ID = tokenizer.convert_tokens_to_ids('[MASK]')
+# For debug use
+f = lambda x, y: tokenizer.convert_ids_to_tokens(torch.nonzero(x[0, x, :]) > y)
+ppl = pipeline('fill-mask', model=bert_path)
 
+
+# End For debug use
 
 def plot_train_len(train_data):
     lens = list(map(lambda x: len(x), train_data))
@@ -186,7 +191,6 @@ def read_data_json(dir_name):
                     input_type.append(encode_dict['token_type_ids'])
                     input_mask.append(encode_dict['attention_mask'])
 
-                # Loss case 3
                 input_id = torch.LongTensor(input_id)
                 complete_ids = torch.LongTensor(complete_ids)
 
@@ -286,17 +290,13 @@ def train(model, train_loaders, eval_loaders, lr=1e-4):
                 model.train()
                 optimizer.zero_grad()
                 output, option_opts, loss = model(ids, masks, types, mask_ids, options, answers)
-
-                # print(opt_acc)
-
-                # loss = criterion(vals_output, answers.squeeze(1))
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
-                loss_sum += loss.item()
-                opt_acc_sum += (option_opts == answers).sum().float() / option_opts.shape[0]
-                acc += 1
-                # print(scheduler.get_lr())
+                with torch.no_grad():
+                    loss_sum += loss.item()
+                    opt_acc_sum += (option_opts == answers).sum().float() / option_opts.shape[0]
+                    acc += 1
             if (i + 1) % (len(train_loaders) // 5) == 0:
                 eval_acc = eval(eval_loaders, model)
                 print(
@@ -306,12 +306,12 @@ def train(model, train_loaders, eval_loaders, lr=1e-4):
                                                                                                  eval_acc,
                                                                                                  scheduler.get_last_lr()))
                 loss_ls.append(loss_sum / acc)
-                acc_ls.append(opt_acc_sum / acc)
+                acc_ls.append(opt_acc_sum.item() / acc)
                 acc = 0
                 loss_sum = 0
                 opt_acc_sum = 0
 
-                if eval_acc > highest_dev_acc and eval_acc > 0.5:
+                if eval_acc > highest_dev_acc and eval_acc > 0.75:
                     highest_dev_acc = eval_acc
                     torch.save(model, MODEL_FILE_NAME + str(eval_acc))
                     print("Model saved!")
